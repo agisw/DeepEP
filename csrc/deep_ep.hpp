@@ -10,6 +10,7 @@
 #include <torch/types.h>
 #include <tuple>
 #include <vector>
+#include <mutex>
 
 #include "config.hpp"
 #include "event.hpp"
@@ -29,6 +30,7 @@ private:
     // Low-latency mode buffer
     int low_latency_buffer_idx = 0;
     bool low_latency_mode = false;
+    mutable std::mutex buffer_switch_mutex;  // Thread-safe buffer switching
 
     // NVLink Buffer
     int64_t num_nvl_bytes;
@@ -52,11 +54,6 @@ private:
     // After IPC/NVSHMEM synchronization, this flag will be true
     bool available = false;
 
-    // Whether explicit `destroy()` is required.
-    bool explicitly_destroy;
-    // After `destroy()` be called, this flag will be true
-    bool destroyed = false;
-
     // Barrier signals
     int* barrier_signal_ptrs[NUM_MAX_NVL_PEERS] = {nullptr};
     int** barrier_signal_ptrs_gpu = nullptr;
@@ -77,7 +74,7 @@ private:
     int* moe_recv_rdma_counter_mapped = nullptr;
 
 public:
-    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode, bool explicitly_destroy);
+    Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes, bool low_latency_mode);
 
     ~Buffer() noexcept(false);
 
@@ -99,11 +96,7 @@ public:
 
     torch::Tensor get_local_buffer_tensor(const pybind11::object& dtype, int64_t offset, bool use_rdma_buffer) const;
 
-    torch::Stream get_comm_stream() const;
-
     void sync(const std::vector<int>& device_ids, const std::vector<std::optional<pybind11::bytearray>>& all_gathered_handles, const std::optional<pybind11::bytearray>& root_unique_id_opt);
-
-    void destroy();
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, std::optional<EventHandle>>
     get_dispatch_layout(const torch::Tensor& topk_idx, int num_experts, std::optional<EventHandle>& previous_event,
@@ -119,7 +112,6 @@ public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     intranode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
-                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_idx, const torch::Tensor& rank_prefix_matrix, const torch::Tensor& channel_prefix_matrix,
                       const torch::Tensor& send_head, const Config& config, std::optional<EventHandle>& previous_event, bool async, bool allocate_on_comm_stream);
 
@@ -135,7 +127,6 @@ public:
 
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, std::optional<EventHandle>>
     internode_combine(const torch::Tensor& x, const std::optional<torch::Tensor>& topk_weights,
-                      const std::optional<torch::Tensor>& bias_0, const std::optional<torch::Tensor>& bias_1,
                       const torch::Tensor& src_meta, const torch::Tensor& is_combined_token_in_rank,
                       const torch::Tensor& rdma_channel_prefix_matrix, const torch::Tensor& rdma_rank_prefix_sum, const torch::Tensor& gbl_channel_prefix_matrix,
                       const torch::Tensor& combined_rdma_head, const torch::Tensor& combined_nvl_head,
@@ -146,7 +137,6 @@ public:
     std::tuple<torch::Tensor, std::optional<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_dispatch(const torch::Tensor& x, const torch::Tensor& topk_idx,
                          const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
-                         const std::optional<torch::Tensor>& dispatch_wait_recv_cost_stats,
                          int num_max_dispatch_tokens_per_rank, int num_experts,
                          bool use_fp8, bool round_scale, bool use_ue8m0,
                          bool async, bool return_recv_hook);
@@ -154,13 +144,21 @@ public:
     std::tuple<torch::Tensor, std::optional<EventHandle>, std::optional<std::function<void()>>>
     low_latency_combine(const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
                         const torch::Tensor& src_info, const torch::Tensor& layout_range,
-                        const std::optional<torch::Tensor>& combine_wait_recv_cost_stats,
                         int num_max_dispatch_tokens_per_rank, int num_experts,
-                        bool use_logfmt, bool zero_copy, bool async, bool return_recv_hook,
+                        bool zero_copy, bool async, bool return_recv_hook,
                         const std::optional<torch::Tensor>& out = std::nullopt);
 
     torch::Tensor
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
+
+    // Thread-safe buffer index switching
+    std::pair<int, int> get_and_switch_buffer_indices() {
+        std::lock_guard<std::mutex> lock(buffer_switch_mutex);
+        int current = low_latency_buffer_idx;
+        int next = current ^ 1;
+        low_latency_buffer_idx = next;
+        return {current, next};
+    }
 };
 
 } // namespace deep_ep

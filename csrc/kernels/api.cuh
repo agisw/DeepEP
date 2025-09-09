@@ -4,6 +4,9 @@
 
 namespace deep_ep {
 
+// Forward declaration
+struct ExpertSyncInfo;
+
 // Intranode runtime
 namespace intranode {
 
@@ -68,7 +71,6 @@ void cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels,
 void combine(cudaDataType_t type,
              void* recv_x, float* recv_topk_weights,
              const void* x, const float* topk_weights,
-             const void* bias_0, const void* bias_1,
              const int* src_idx, const int* rank_prefix_matrix, const int* channel_prefix_matrix,
              int* send_head, int num_tokens, int num_recv_tokens, int hidden, int num_topk,
              void** buffer_ptrs, int rank, int num_ranks,
@@ -122,13 +124,13 @@ void combine(cudaDataType_t type,
              void* combined_x, float* combined_topk_weights,
              const bool* is_combined_token_in_rank,
              const void* x, const float* topk_weights,
-             const void* bias_0, const void* bias_1,
              const int* combined_rdma_head, const int* combined_nvl_head,
              const void* src_meta, const int* rdma_channel_prefix_matrix, const int* rdma_rank_prefix_sum, const int* gbl_channel_prefix_matrix,
              int num_tokens, int num_combined_tokens, int hidden, int num_topk,
              void* rdma_buffer_ptr, int num_max_rdma_chunked_send_tokens, int num_max_rdma_chunked_recv_tokens,
              void** buffer_ptrs, int num_max_nvl_chunked_send_tokens, int num_max_nvl_chunked_recv_tokens,
-             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode);
+             int rank, int num_ranks, cudaStream_t stream, int num_channels, bool low_latency_mode,
+             void* fp32_workspace_ptr = nullptr);  // FP32 workspace for NVSHMEM reduction
 
 } // namespace internode
 
@@ -139,14 +141,22 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
                               cudaStream_t stream);
 
+void clean_low_latency_buffer_with_sync(int* clean_0, int num_clean_int_0,
+                                       int* clean_1, int num_clean_int_1,
+                                       ExpertSyncInfo* expert_sync_info,
+                                       int num_experts,
+                                       cudaStream_t stream);
+
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
-              int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
+              ExpertSyncInfo* expert_sync_info_buffer,
+              void* combined_x,  // NEW: combined_x buffer for NVSHMEM GET
               const void* x, const int64_t* topk_idx,
               int* next_clean, int num_next_clean_int,
+              const int* num_recv_tokens_per_rank,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
@@ -154,14 +164,14 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases);
 
 void combine(void* combined_x,
+             void* fp32_workspace,  // Separate FP32 workspace for NVSHMEM reduction
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
+             ExpertSyncInfo* expert_sync_info_buffer,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
-             int64_t* combine_wait_recv_cost_stats,
              int* next_clean, int num_next_clean_int,
              int num_combined_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
              int num_topk, int num_experts, int rank, int num_ranks,
-             bool use_logfmt,
              void* workspace, int num_device_sms,
              cudaStream_t stream, int phases, bool zero_copy);
 
