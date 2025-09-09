@@ -10,6 +10,7 @@
 #include <torch/types.h>
 #include <tuple>
 #include <vector>
+#include <mutex>
 
 #include "config.hpp"
 #include "event.hpp"
@@ -29,6 +30,7 @@ private:
     // Low-latency mode buffer
     int low_latency_buffer_idx = 0;
     bool low_latency_mode = false;
+    mutable std::mutex buffer_switch_mutex;  // Thread-safe buffer switching
 
     // NVLink Buffer
     int64_t num_nvl_bytes;
@@ -161,6 +163,15 @@ public:
 
     torch::Tensor
     get_next_low_latency_combine_buffer(int num_max_dispatch_tokens_per_rank, int hidden, int num_experts) const;
+
+    // Thread-safe buffer index switching
+    std::pair<int, int> get_and_switch_buffer_indices() {
+        std::lock_guard<std::mutex> lock(buffer_switch_mutex);
+        int current = low_latency_buffer_idx;
+        int next = current ^ 1;
+        low_latency_buffer_idx = next;
+        return {current, next};
+    }
 };
 
 } // namespace deep_ep
