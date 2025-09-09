@@ -6,14 +6,34 @@
 namespace deep_ep {
 
 template <typename dtype_t>
-dtype_t ceil_div(dtype_t a, dtype_t b) {
+inline dtype_t ceil_div(dtype_t a, dtype_t b) {
     return (a + b - 1) / b;
 }
 
 template <typename dtype_t>
-dtype_t align(dtype_t a, dtype_t b) {
+inline dtype_t align(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
 }
+
+// Improved synchronization structure to avoid race conditions
+struct ExpertSyncInfo {
+    // Number of tokens expected from each rank
+    int expected_tokens_per_rank[8];  // Assuming max 8 ranks for now
+    // Number of tokens actually received from each rank
+    int received_tokens_per_rank[8];
+    // Total expected tokens
+    int total_expected_tokens;
+    // Total received tokens
+    int total_received_tokens;
+    // Completion flags per rank
+    int completed_ranks;
+    // Expert processing completion counter
+    int expert_processing_complete;
+    // 🔧 FIX: Add combined_x address for NVSHMEM get in Pure EP mode
+    void* combined_x_ptr;  // Pointer to combined_x buffer in NVSHMEM symmetric heap
+    // Padding to avoid false sharing (reduced by 1 due to new pointer)
+    int padding[1];
+};
 
 struct Config {
     int num_sms;
@@ -108,12 +128,32 @@ struct LowLatencyBuffer {
     void* combine_rdma_recv_data_buffer = nullptr;
     int* combine_rdma_recv_flag_buffer = nullptr;
 
+    // Expert synchronization info buffer
+    ExpertSyncInfo* expert_sync_info_buffer = nullptr;
+
     void* combine_rdma_send_buffer_data_start = nullptr;
     size_t num_bytes_per_combine_msg = 0;
 
     std::pair<int*, int> clean_meta() {
         EP_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
         return {dispatch_rdma_recv_count_buffer, num_clean_int};
+    }
+
+    // Provide separate clean meta that excludes count buffer
+    // The count buffer must NOT be cleared between dispatch and combine
+    // as it contains count values that combine kernel needs to read
+    std::pair<int*, int> clean_meta_exclude_count(int num_experts, int num_ranks) {
+        // The count buffer is sized as [num_local_experts][num_ranks]
+        int num_local_experts = num_experts / num_ranks;
+        int count_buffer_size = num_local_experts * num_ranks;
+
+        // Skip the count buffer entirely
+        // Only clean the rest of the signaling buffer
+        if (num_clean_int <= count_buffer_size) {
+            // Nothing to clean if the entire buffer is just the count data
+            return {nullptr, 0};
+        }
+        return {dispatch_rdma_recv_count_buffer + count_buffer_size, num_clean_int - count_buffer_size};
     }
 };
 
@@ -139,7 +179,8 @@ struct LowLatencyLayout {
         // NOTES: `num_scales * sizeof(nv_bfloat162)` means the per-128-channel min/max
         EP_HOST_ASSERT(num_scales * sizeof(float) <= hidden);
         size_t num_bytes_per_dispatch_msg = sizeof(int4) + std::max(hidden * sizeof(nv_bfloat16), hidden + num_scales * sizeof(float));
-        size_t num_bytes_per_combine_msg = num_scales * sizeof(nv_bfloat162) + hidden * sizeof(nv_bfloat16);
+        // size_t num_bytes_per_combine_msg = num_scales * sizeof(nv_bfloat162) + hidden * sizeof(nv_bfloat16);
+        size_t num_bytes_per_combine_msg = hidden * sizeof(nv_bfloat16);
 
         // Send buffer
         size_t dispatch_send_buffer_bytes = num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
@@ -150,35 +191,53 @@ struct LowLatencyLayout {
 
         // Symmetric receive buffers
         // TODO: optimize memory usages
-        size_t dispatch_recv_data_buffer_bytes = num_experts * num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
-        size_t combine_recv_buffer_bytes = num_experts * num_max_dispatch_tokens_per_rank * num_bytes_per_combine_msg;
+        // Buffer must be sized for num_experts * num_ranks * num_max_dispatch_tokens_per_rank
+        // to match the kernel's access pattern in internode_ll.cu
+        size_t dispatch_recv_data_buffer_bytes = num_experts * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_dispatch_msg;
+        size_t combine_recv_buffer_bytes = num_experts * num_ranks * num_max_dispatch_tokens_per_rank * num_bytes_per_combine_msg;
         size_t recv_buffer_bytes = std::max(dispatch_recv_data_buffer_bytes, combine_recv_buffer_bytes);
         EP_HOST_ASSERT(recv_buffer_bytes % sizeof(int4) == 0);
         total_bytes += recv_buffer_bytes * 2;
 
         // Symmetric signaling buffers
-        size_t dispatch_recv_count_buffer_bytes = num_experts * sizeof(int);
+        // The count buffer must be sized as [num_local_experts][num_ranks]
+        // Each rank needs space to receive counts from all other ranks for each of its local experts
+        size_t num_local_experts = num_experts / num_ranks;
+        size_t dispatch_recv_count_buffer_bytes = num_local_experts * num_ranks * sizeof(int);
         size_t combine_recv_flag_buffer_bytes = dispatch_recv_count_buffer_bytes;
         size_t signaling_buffer_bytes = std::max(dispatch_recv_count_buffer_bytes, combine_recv_flag_buffer_bytes);
-        size_t signaling_buffer_bytes_aligned = align<size_t>(signaling_buffer_bytes, 128);
-        total_bytes += signaling_buffer_bytes_aligned * 2;
+        total_bytes += signaling_buffer_bytes * 2;
+
+        // Expert synchronization info buffer
+        size_t expert_sync_info_bytes = num_experts * sizeof(ExpertSyncInfo);
+        total_bytes += expert_sync_info_bytes;
 
         // Assign pointers
         // NOTES: we still leave some space for distinguishing dispatch/combine buffer,
         // so you may see some parameters are duplicated
+
+        // Calculate base offset for sync info buffer (after all other buffers)
+        size_t sync_info_offset = send_buffer_bytes * 2 + recv_buffer_bytes * 2 + signaling_buffer_bytes * 2;
+
         for (int i = 0; i < 2; ++ i) {
             buffers[i] = {
                 static_cast<int>(signaling_buffer_bytes / sizeof(int)),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2 + recv_buffer_bytes * i),
-                advance<int*>(rdma_buffer, signaling_buffer_bytes_aligned * i),
-                advance(rdma_buffer, signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * i),
+                advance(rdma_buffer, send_buffer_bytes * i),
+                advance(rdma_buffer, send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                advance<int*>(rdma_buffer, send_buffer_bytes * 2 + recv_buffer_bytes * 2 + signaling_buffer_bytes * i),
+                advance(rdma_buffer, send_buffer_bytes * i),
+                advance(rdma_buffer, send_buffer_bytes * 2 + recv_buffer_bytes * i),
+                advance<int*>(rdma_buffer, send_buffer_bytes * 2 + recv_buffer_bytes * 2 + signaling_buffer_bytes * i),
+                nullptr,  // expert_sync_info_buffer will be set below
+                advance(rdma_buffer, send_buffer_bytes * i),
                 num_bytes_per_combine_msg
             };
         }
+
+        // Set the expert_sync_info_buffer for both buffers
+        // They share the same sync info buffer
+        buffers[0].expert_sync_info_buffer = advance<ExpertSyncInfo*>(rdma_buffer, sync_info_offset);
+        buffers[1].expert_sync_info_buffer = buffers[0].expert_sync_info_buffer;
     }
 };
 

@@ -7,7 +7,6 @@
 #include "utils.cuh"
 
 #ifndef DISABLE_NVSHMEM
-#include "nvshmem.h"
 #include "ibgda_device.cuh"
 #endif
 

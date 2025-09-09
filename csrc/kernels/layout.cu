@@ -7,10 +7,11 @@ namespace deep_ep {
 namespace layout {
 
 template <int kNumThreads, int kNumExpertsPerSM, int kNumRanksPerSM>
-__global__ void get_dispatch_layout(const int64_t* topk_idx,
-                                    int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
-                                    int* num_tokens_per_expert, bool* is_token_in_rank,
-                                    int num_tokens, int num_topk, int num_ranks, int num_experts) {
+__global__ void __launch_bounds__(kNumThreads, 1)
+get_dispatch_layout(const int64_t* topk_idx,
+                    int* num_tokens_per_rank, int* num_tokens_per_rdma_rank,
+                    int* num_tokens_per_expert, bool* is_token_in_rank,
+                    int num_tokens, int num_topk, int num_ranks, int num_experts) {
     auto sm_id = static_cast<int>(blockIdx.x);
     auto thread_id = static_cast<int>(threadIdx.x);
 
@@ -86,12 +87,16 @@ __global__ void get_dispatch_layout(const int64_t* topk_idx,
             #pragma unroll
             for (int j = 0; j + rank_begin_idx < rank_end_idx; ++ j) {
                 shifted_is_token_in_rank[j + rank_begin_idx] = (is_in_rank[j] > 0);
-                num_tokens_per_rank_per_thread[thread_id][j] += (is_in_rank[j] > 0);
+                // Count all token-expert pairs, not just unique tokens
+                // When a token selects multiple experts on the same rank,
+                // we need to count each occurrence for proper buffer allocation
+                num_tokens_per_rank_per_thread[thread_id][j] += is_in_rank[j];
             }
 
             #pragma unroll
             for (int j = 0; j + rdma_rank_begin_idx < rdma_rank_end_idx; ++ j)
-                num_tokens_per_rdma_rank_per_thread[thread_id][j] += (is_in_rdma_rank[j] > 0);
+                // Count all occurrences for RDMA ranks too
+                num_tokens_per_rdma_rank_per_thread[thread_id][j] += is_in_rdma_rank[j];
         }
         __syncthreads();
 
@@ -120,9 +125,9 @@ void get_dispatch_layout(const int64_t* topk_idx,
                          int* num_tokens_per_expert, bool* is_token_in_rank,
                          int num_tokens, int num_topk, int num_ranks, int num_experts,
                          cudaStream_t stream) {
-    constexpr int kNumThreads = 256, kNumExpertsPerSM = 4, kNumRanksPerSM = 8;
+    constexpr int kNumThreads = 256, kNumExpertsPerSM = 32, kNumRanksPerSM = 8;
     int num_sms = ((num_experts + kNumExpertsPerSM - 1) / kNumExpertsPerSM) + (num_ranks + kNumRanksPerSM - 1) / kNumRanksPerSM;
-    EP_STATIC_ASSERT(kNumRanksPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of ranks per SM");
+    EP_STATIC_ASSERT(kNumExpertsPerSM % NUM_MAX_NVL_PEERS == 0, "Invalid number of experts per SM");
 
     SETUP_LAUNCH_CONFIG(num_sms, kNumThreads, stream);
     LAUNCH_KERNEL(&cfg, (get_dispatch_layout<kNumThreads, kNumExpertsPerSM, kNumRanksPerSM>),
