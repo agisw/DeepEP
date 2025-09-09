@@ -15,6 +15,26 @@ dtype_t align(dtype_t a, dtype_t b) {
     return ceil_div<dtype_t>(a, b) * b;
 }
 
+// Improved synchronization structure to avoid race conditions
+struct ExpertSyncInfo {
+    // Number of tokens expected from each rank
+    int expected_tokens_per_rank[8];  // Assuming max 8 ranks for now
+    // Number of tokens actually received from each rank
+    int received_tokens_per_rank[8];
+    // Total expected tokens
+    int total_expected_tokens;
+    // Total received tokens
+    int total_received_tokens;
+    // Completion flags per rank
+    int completed_ranks;
+    // Expert processing completion counter
+    int expert_processing_complete;
+    // 🔧 FIX: Add combined_x address for NVSHMEM get in Pure EP mode
+    void* combined_x_ptr;  // Pointer to combined_x buffer in NVSHMEM symmetric heap
+    // Padding to avoid false sharing (reduced by 1 due to new pointer)
+    int padding[1];
+};
+
 struct Config {
     int num_sms;
     int num_max_nvl_chunked_send_tokens;
@@ -111,6 +131,9 @@ struct LowLatencyBuffer {
     void* combine_rdma_send_buffer_data_start = nullptr;
     size_t num_bytes_per_combine_msg = 0;
 
+    // Expert synchronization info buffer
+    ExpertSyncInfo* expert_sync_info_buffer = nullptr;
+
     std::pair<int*, int> clean_meta() {
         EP_HOST_ASSERT(dispatch_rdma_recv_count_buffer == combine_rdma_recv_flag_buffer);
         return {dispatch_rdma_recv_count_buffer, num_clean_int};
@@ -179,6 +202,12 @@ struct LowLatencyLayout {
                 num_bytes_per_combine_msg
             };
         }
+
+        total_bytes += num_experts * sizeof(ExpertSyncInfo);
+        // Set the expert_sync_info_buffer for both buffers
+        // They share the same sync info buffer
+        buffers[0].expert_sync_info_buffer = advance<ExpertSyncInfo*>(rdma_buffer, num_experts * sizeof(ExpertSyncInfo));
+        buffers[1].expert_sync_info_buffer = buffers[0].expert_sync_info_buffer;
     }
 };
 

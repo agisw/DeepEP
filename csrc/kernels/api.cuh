@@ -4,6 +4,9 @@
 
 namespace deep_ep {
 
+// Forward declaration
+struct ExpertSyncInfo;
+
 // Intranode runtime
 namespace intranode {
 
@@ -139,14 +142,23 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                               int* clean_1, int num_clean_int_1,
                               cudaStream_t stream);
 
+void clean_low_latency_buffer_with_sync(int* clean_0, int num_clean_int_0,
+                                       int* clean_1, int num_clean_int_1,
+                                       ExpertSyncInfo* expert_sync_info,
+                                       int num_experts,
+                                       cudaStream_t stream);
+
 void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               int* packed_recv_src_info, int64_t* packed_recv_layout_range,
               int* packed_recv_count,
               int* cumulative_local_expert_recv_stats,
               int64_t* dispatch_wait_recv_cost_stats,
               void* rdma_recv_x, int* rdma_recv_count, void* rdma_x,
+              ExpertSyncInfo* expert_sync_info_buffer,
+              void* combined_x,  // NEW: combined_x buffer for NVSHMEM GET
               const void* x, const int64_t* topk_idx,
               int* next_clean, int num_next_clean_int,
+              const int* num_recv_tokens_per_rank,
               int num_tokens, int hidden, int num_max_dispatch_tokens_per_rank,
               int num_topk, int num_experts, int rank, int num_ranks,
               bool use_fp8, bool round_scale, bool use_ue8m0,
@@ -154,7 +166,9 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
               cudaStream_t stream, int phases);
 
 void combine(void* combined_x,
+             void* fp32_workspace,  // Separate FP32 workspace for NVSHMEM reduction
              void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
+             ExpertSyncInfo* expert_sync_info_buffer,
              const void* x, const int64_t* topk_idx, const float* topk_weights,
              const int* src_info, const int64_t* layout_range,
              int64_t* combine_wait_recv_cost_stats,
