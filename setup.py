@@ -53,6 +53,10 @@ if __name__ == '__main__':
         nvcc_dlink.extend(['-dlink', f'-L{nvshmem_dir}/lib', '-lnvshmem_device'])
         extra_link_args.extend([f'-l:{nvshmem_host_lib}', '-l:libnvshmem_device.a', f'-Wl,-rpath,{nvshmem_dir}/lib'])
 
+    # Ensure CUDA device runtime is linked when using relocatable device code
+    if '-rdc=true' in nvcc_flags and '-lcudadevrt' not in extra_link_args:
+        extra_link_args.append('-lcudadevrt')
+
     if int(os.getenv('DISABLE_SM90_FEATURES', 0)):
         # Prefer A100
         os.environ['TORCH_CUDA_ARCH_LIST'] = os.getenv('TORCH_CUDA_ARCH_LIST', '8.0')
