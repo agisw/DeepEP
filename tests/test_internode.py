@@ -27,7 +27,7 @@ def test_main(args: argparse.Namespace,
     num_tokens, hidden = args.num_tokens, args.hidden
     num_topk_groups, num_topk, num_experts = args.num_topk_groups, args.num_topk, args.num_experts
 
-    assert num_experts % num_ranks == 0 and num_local_ranks == 8
+    assert num_experts % num_ranks == 0
     if local_rank == 0:
         print(f'[config] num_tokens={num_tokens}, hidden={hidden}, num_topk_groups={num_topk_groups}, num_topk={num_topk}', flush=True)
 
@@ -322,13 +322,25 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
     num_sms = 24
     num_qps_per_rank = max(num_sms, ll_num_experts // num_ranks if args.test_ll_compatibility else 0)
 
+    rdma_buffer_size, nvl_buffer_size = 128, 512
+    _config = deep_ep.Config(num_sms, 8, nvl_buffer_size, 16, rdma_buffer_size)
+    hidden_bytes = args.hidden * 2  # bfloat16
+    num_nvl_bytes = int(_config.get_nvl_buffer_size_hint(hidden_bytes, num_ranks, num_local_ranks))
+    num_rdma_bytes = int(_config.get_rdma_buffer_size_hint(hidden_bytes, num_ranks, num_local_ranks))
+    if args.test_ll_compatibility:
+        ll_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(ll_num_tokens, ll_hidden, num_ranks, ll_num_experts)
+        num_rdma_bytes = max(num_rdma_bytes, ll_rdma_bytes)
+    if local_rank == 0:
+        print(f'[buffer] NVL={num_nvl_bytes // (1024*1024)}MB, RDMA={num_rdma_bytes // (1024*1024)}MB', flush=True)
+
     buffer = deep_ep.Buffer(group,
-                            int(2e9),
-                            int(1e9),
+                            num_nvl_bytes,
+                            num_rdma_bytes,
                             low_latency_mode=args.test_ll_compatibility,
+                            num_local_ranks=num_local_ranks,
                             num_qps_per_rank=num_qps_per_rank,
                             explicitly_destroy=True)
-    assert num_local_ranks == 8 and num_ranks > 8
+    assert num_ranks > num_local_ranks
 
     for seed in range(int(1e9)):
         if local_rank == 0:
@@ -359,6 +371,8 @@ def test_loop(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     # Test compatibility with low latency functions
     if args.test_ll_compatibility:
+        torch.cuda.synchronize()
+        dist.barrier()
         buffer.clean_low_latency_buffer(ll_num_tokens, ll_hidden, ll_num_experts)
         test_low_latency.test_main(ll_num_tokens, ll_hidden, ll_num_experts, ll_num_topk, rank, num_ranks, group, buffer, seed=1)
 

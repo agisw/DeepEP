@@ -35,6 +35,7 @@ class Buffer:
                  num_rdma_bytes: int = 0,
                  low_latency_mode: bool = False,
                  num_qps_per_rank: int = 24,
+                 num_local_ranks: Optional[int] = None,
                  allow_nvlink_for_low_latency_mode: bool = True,
                  allow_mnnvl: bool = False,
                  use_fabric: bool = False,
@@ -51,6 +52,9 @@ class Buffer:
             low_latency_mode: whether to enable low-latency mode.
             num_qps_per_rank: the number of QPs for RDMA, the low-latency mode requires that this number equals
                 to the number of local experts.
+            num_local_ranks: the number of GPUs per node (NVLink peers). Defaults to min(group_size, 8).
+                Supported values: 1, 2, 4, 8. This controls how ranks are decomposed into
+                RDMA groups (inter-node) and NVLink groups (intra-node).
             allow_nvlink_for_low_latency_mode: whether allow NVLink traffic for low-latency mode, you should notice
                 this is somehow incompatible with the hook-based overlapping.
                 Warning: PCIe connections may lead to errors due to memory ordering issues,
@@ -63,7 +67,7 @@ class Buffer:
                 Note: Releasing resources in the destructor may cause Python's exception handling process to hang.
             comm: the `mpi4py.MPI.Comm` communicator to use in case the group parameter is absent.
         """
-        check_nvlink_connections(group)
+        check_nvlink_connections(group, num_local_ranks)
 
         # Initialize the CPP runtime
         if group is not None:
@@ -89,8 +93,11 @@ class Buffer:
         self.low_latency_mode = low_latency_mode
         self.explicitly_destroy = explicitly_destroy
         self.enable_shrink = enable_shrink
-        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_nvl_bytes, num_rdma_bytes, low_latency_mode, explicitly_destroy,
-                                          enable_shrink, use_fabric)
+        if num_local_ranks is None:
+            num_local_ranks = int(os.environ.get('LOCAL_WORLD_SIZE', min(self.group_size, 8)))
+        self.num_local_ranks = num_local_ranks
+        self.runtime = deep_ep_cpp.Buffer(self.rank, self.group_size, num_local_ranks, num_nvl_bytes, num_rdma_bytes,
+                                          low_latency_mode, explicitly_destroy, enable_shrink, use_fabric)
 
         # Synchronize device IDs
         local_device_id = self.runtime.get_local_device_id()

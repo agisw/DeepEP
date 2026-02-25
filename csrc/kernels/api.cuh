@@ -18,7 +18,7 @@ namespace internode {
 
 std::vector<uint8_t> get_unique_id();
 
-int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, bool low_latency_mode);
+int init(const std::vector<uint8_t>& root_unique_id_val, int rank, int num_ranks, int num_local_ranks, bool low_latency_mode);
 
 void* alloc(size_t size, size_t alignment);
 
@@ -42,6 +42,7 @@ void get_dispatch_layout(const topk_idx_t* topk_idx,
                          int num_topk,
                          int num_ranks,
                          int num_experts,
+                         int num_nvl_ranks,
                          cudaStream_t stream);
 
 }  // namespace layout
@@ -147,6 +148,7 @@ int get_source_meta_bytes();
 void notify_dispatch(const int* num_tokens_per_rank,
                      int* moe_recv_counter_mapped,
                      int num_ranks,
+                     int num_nvl_ranks,
                      const int* num_tokens_per_rdma_rank,
                      int* moe_recv_rdma_counter_mapped,
                      const int* num_tokens_per_expert,
@@ -209,6 +211,7 @@ void dispatch(void* recv_x,
               int num_max_nvl_chunked_recv_tokens,
               int rank,
               int num_ranks,
+              int num_nvl_ranks,
               bool is_cached_dispatch,
               cudaStream_t stream,
               int num_channels,
@@ -219,6 +222,7 @@ void cached_notify(int hidden_int4,
                    int num_topk_idx,
                    int num_topk_weights,
                    int num_ranks,
+                   int num_nvl_ranks,
                    int num_channels,
                    int num_combined_tokens,
                    int* combined_rdma_head,
@@ -263,6 +267,7 @@ void combine(cudaDataType_t type,
              int num_max_nvl_chunked_recv_tokens,
              int rank,
              int num_ranks,
+             int num_nvl_ranks,
              cudaStream_t stream,
              int num_channels,
              bool low_latency_mode);

@@ -502,7 +502,7 @@ __forceinline__ __device__ out_dtype_t extract_required_scale_format(float value
 }
 
 template <int kNumRanks, bool kSyncOnly = false>
-__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank) {
+__forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int rank, int num_active_ranks = kNumRanks) {
     auto thread_id = static_cast<int>(threadIdx.x);
 
     // For non-sync-only cases, the memory operations by other threads in the block must be visible to the `sys` scope
@@ -512,20 +512,20 @@ __forceinline__ __device__ void barrier_block(int** barrier_signal_ptrs, int ran
     }
 
     // Add self-ranks, sub other ranks
-    if (thread_id < kNumRanks) {
+    if (thread_id < num_active_ranks) {
         atomicAdd_system(barrier_signal_ptrs[rank] + thread_id, FINISHED_SUM_TAG);
         atomicSub_system(barrier_signal_ptrs[thread_id] + rank, FINISHED_SUM_TAG);
     }
-    EP_DEVICE_ASSERT(kNumRanks <= blockDim.x);
+    EP_DEVICE_ASSERT(num_active_ranks <= blockDim.x);
 
     // Check timeout
     auto start_time = clock64();
     while (true) {
-        auto value = thread_id < kNumRanks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
+        auto value = thread_id < num_active_ranks ? ld_volatile_global(barrier_signal_ptrs[rank] + thread_id) : 0;
         if (__all_sync(0xffffffff, value <= 0))
             break;
 
-        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < kNumRanks) {
+        if (clock64() - start_time > NUM_TIMEOUT_CYCLES and thread_id < num_active_ranks) {
             printf("DeepEP timeout check failed: rank = %d, thread = %d, value = %d)\n", rank, thread_id, value);
             trap();
         }

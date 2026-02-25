@@ -61,13 +61,18 @@ class EventOverlap:
             self.event.current_stream_wait()
 
 
-def check_nvlink_connections(group: dist.ProcessGroup):
+def check_nvlink_connections(group: dist.ProcessGroup, num_local_ranks: int = None):
     """
     Check NVLink connection between every pair of GPUs.
 
     Arguments:
         group: the communication group.
+        num_local_ranks: number of local ranks (GPUs per node). If 1, skip NVLink check.
     """
+    # Skip NVLink check when there's only 1 GPU per node (no local peers)
+    if num_local_ranks is not None and num_local_ranks <= 1:
+        return
+
     # Check NVLink connection
     # NOTES: some A100 PCIE GPUs only have pairwise NVLink connection, so that we can only use EP2
     # TODO: check all cases, all local-node GPUs in the group should be connected via NVLink

@@ -115,6 +115,7 @@ private:
 public:
     Buffer(int rank,
            int num_ranks,
+           int num_local_ranks,
            int64_t num_nvl_bytes,
            int64_t num_rdma_bytes,
            bool low_latency_mode,
