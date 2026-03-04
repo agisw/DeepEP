@@ -27,14 +27,28 @@ Buffer::Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_
     EP_HOST_ASSERT(num_nvl_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (num_nvl_bytes <= std::numeric_limits<int>::max() or num_rdma_bytes == 0));
     EP_HOST_ASSERT(num_rdma_bytes % NUM_BUFFER_ALIGNMENT_BYTES == 0 and (low_latency_mode or num_rdma_bytes <= std::numeric_limits<int>::max()));
     EP_HOST_ASSERT(0 <= rank and rank < num_ranks and (num_ranks <= NUM_MAX_NVL_PEERS * NUM_MAX_RDMA_PEERS or low_latency_mode));
-    EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
-    if (num_rdma_bytes > 0)
+    if (num_nvl_bytes > 0)
+        EP_HOST_ASSERT(num_ranks < NUM_MAX_NVL_PEERS or num_ranks % NUM_MAX_NVL_PEERS == 0);
+    if (num_rdma_bytes > 0 and num_nvl_bytes > 0)
         EP_HOST_ASSERT(num_ranks > NUM_MAX_NVL_PEERS or low_latency_mode);
 
     // Get ranks
     CUDA_CHECK(cudaGetDevice(&device_id));
-    rdma_rank = rank / NUM_MAX_NVL_PEERS, nvl_rank = rank % NUM_MAX_NVL_PEERS;
-    num_rdma_ranks = std::max(1, num_ranks / NUM_MAX_NVL_PEERS), num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
+    if (num_nvl_bytes > 0) {
+        // Original topology: fixed-size NVLink domains (up to 8 GPUs per node),
+        // RDMA links between same NVLink slot across nodes.
+        num_nvl_ranks = std::min(num_ranks, NUM_MAX_NVL_PEERS);
+        rdma_rank = rank / num_nvl_ranks;
+        nvl_rank = rank % num_nvl_ranks;
+        num_rdma_ranks = (num_ranks + num_nvl_ranks - 1) / num_nvl_ranks;
+    } else {
+        // RDMA-only topology (e.g. 1 GPU per node):
+        // each rank is its own RDMA rank and has a single local NVLink peer slot.
+        num_nvl_ranks = 1;
+        nvl_rank = 0;
+        rdma_rank = rank;
+        num_rdma_ranks = num_ranks;
+    }
 #ifdef DISABLE_NVSHMEM
     EP_HOST_ASSERT(num_rdma_ranks == 1 and not low_latency_mode and "NVSHMEM is disabled during compilation");
 #endif
@@ -95,7 +109,7 @@ bool Buffer::is_available() const {
 }
 
 bool Buffer::is_internode_available() const {
-    return is_available() and num_ranks > NUM_MAX_NVL_PEERS;
+    return is_available() and num_rdma_ranks > 1;
 }
 
 int Buffer::get_num_rdma_ranks() const {
